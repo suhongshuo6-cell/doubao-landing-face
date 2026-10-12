@@ -327,7 +327,10 @@ function boot(): void {
 
     /** 只有脸在画面里足够大时才允许捏（规格：面部特写段） */
     const PINCH_GATE = 0.38
+    /** 壁钟计时：用 performance.now，避免低帧/dt 抖动导致捏脸奖励永远达不到阈值 */
     let pinchHoldMs = 0
+    let pinchPressStartedAt = 0
+    let pinchArmed = false
     let pinchSuccessCount = 0
     let pinchRewardDone = false
 
@@ -446,17 +449,17 @@ function boot(): void {
         if (gazeScrollLocked) {
           if (
             pressOrigin &&
-            Math.hypot(event.clientX - pressOrigin.x, event.clientY - pressOrigin.y) > 12
+            Math.hypot(event.clientX - pressOrigin.x, event.clientY - pressOrigin.y) > 36
           ) {
             cancelPress()
           }
           return
         }
         trackPointer(event)
-        // 拖动超过 12px 视为滚动/转视角，取消捏脸
+        // 拖动超过 36px 视为滚动/转视角，取消捏脸（允许脸上小幅拖动捏）
         if (
           pressOrigin &&
-          Math.hypot(event.clientX - pressOrigin.x, event.clientY - pressOrigin.y) > 12
+          Math.hypot(event.clientX - pressOrigin.x, event.clientY - pressOrigin.y) > 36
         ) {
           cancelPress()
         }
@@ -473,6 +476,13 @@ function boot(): void {
         // 不在这里取坐标的话 pointerInside 永远是 false，捏脸在手机上完全不会触发。
         // force：用户主动按下时即使刚停滚也立刻取坐标（不接滚动伪事件）。
         trackPointer(event, { force: true })
+        // 同步命中：低帧下若等下一帧再 raycast，短按会被吞掉奖励
+        const talkActiveNow =
+          (window as unknown as { __talkActive?: boolean }).__talkActive === true
+        if (character && pointerInside && !talkActiveNow && rig.framing < PINCH_GATE) {
+          raycaster.setFromCamera(ndc, stage.camera)
+          hoveringFace = raycaster.intersectObject(character.faceProxy, false).length > 0
+        }
         pressOrigin = { x: event.clientX, y: event.clientY }
         if (motionPrefs.coarse) {
           // 触摸端：长按 = 捏脸（规格第八节）。不设长按的话一滑动就会误捏。
@@ -558,15 +568,36 @@ function boot(): void {
       if (pressing && !lastPressing) {
         blip(360)
         pinchHoldMs = 0
-        if (hoveringFace) fx?.react('pinch', ringX.value, ringY.value)
+        pinchArmed = false
+        // 只在脸上起算；空按空气不攒进度
+        pinchPressStartedAt = hoveringFace ? performance.now() : 0
+        if (hoveringFace) {
+          fx?.react('pinch', ringX.value, ringY.value)
+          say('嗯……轻一点。')
+          if (hudStatus) hudStatus.textContent = 'QUEST · 捏脸中'
+          if (hudLine) hudLine.textContent = '按住不放，再拖一拖脸'
+          hud?.classList.add('interaction-live')
+          rootEl.classList.add('interaction-live')
+        }
       }
       if (pressing && hoveringFace) {
-        pinchHoldMs += dt * 1000
+        // 恢复计时：把已累计时长叠回去，避免 raycast 闪断清零
+        if (!pinchPressStartedAt) pinchPressStartedAt = performance.now() - pinchHoldMs
+        pinchHoldMs = performance.now() - pinchPressStartedAt
+        if (pinchHoldMs > 200) pinchArmed = true
+      } else if (pressing && !hoveringFace) {
+        // 离开脸：暂停（保留累计），不归零
+        pinchPressStartedAt = 0
       }
-      if (!pressing && lastPressing && hoveringFace && pinchHoldMs > 280) {
+      // 松手发奖：按住期间已 armed（脸上累计 ≥200ms）即可，不依赖松手当帧 hit
+      if (!pressing && lastPressing && pinchArmed) {
         firePinchReward(ringX.value, ringY.value)
       }
-      if (!pressing) pinchHoldMs = 0
+      if (!pressing) {
+        pinchHoldMs = 0
+        pinchPressStartedAt = 0
+        pinchArmed = false
+      }
       lastPressing = pressing
       if (canvas) {
         const breathe = Math.sin(performance.now() * 0.00135) * 0.7
