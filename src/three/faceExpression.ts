@@ -105,6 +105,8 @@ export class FaceExpression {
   private lastPointerAt = -100
   private pointer = new THREE.Vector2()
   private pointerVel = new THREE.Vector2()
+  /** Lenis/wheel 滚动中：冻结指针驱动，视线阻尼回中，避免滚动伪鼠标事件让眼球乱飘 */
+  private scrollLock = false
   private orient: THREE.Vector2 | null = null
   private speaking = false
   private thinking = false
@@ -182,9 +184,34 @@ export class FaceExpression {
   }
 
   setPointer(ndc: THREE.Vector2): void {
+    // 滚动中忽略指针 —— 滚轮/触控板常夹带伪 pointermove，会把视线打成抖动
+    if (this.scrollLock) return
     this.pointerVel.set(ndc.x - this.pointer.x, ndc.y - this.pointer.y)
     if (ndc.distanceToSquared(this.pointer) > 1e-6) this.lastPointerAt = this.time
     this.pointer.copy(ndc)
+  }
+
+  /**
+   * 滚动锁：Lenis/wheel 期间冻结指针跟随，视线阻尼回镜头；
+   * 解锁后回到平静 idle，不接续滚动期间的抖动目标。
+   */
+  setScrollLock(locked: boolean): void {
+    if (locked === this.scrollLock) return
+    this.scrollLock = locked
+    if (locked) {
+      this.gazeTarget.copy(this.gaze)
+      this.saccade.set(0, 0)
+      this.gazeVel.set(0, 0)
+      this.pointerVel.set(0, 0)
+      return
+    }
+    // 恢复平静 idle：看向镜头，短暂忽略旧 pointer，等真实移动再跟
+    this.idleTarget.set(0, 0)
+    this.nextIdle = this.time + rand(2.0, 4.5)
+    this.saccade.set(0, 0)
+    this.gazeVel.set(0, 0)
+    this.gazeTarget.set(0, 0)
+    this.lastPointerAt = this.time - 3.3
   }
 
   triggerHappy(): void {
@@ -281,7 +308,12 @@ export class FaceExpression {
     else if (f === 'listen') this.gazeTarget.set(0.1, 0.06)
     else if (f === 'think') this.gazeTarget.set(-0.3, 0.4)
     else if (f) this.gazeTarget.set(0, 0)
-    else {
+    else if (this.scrollLock) {
+      // 滚动中：阻尼回镜头中心，不跟 pointer、不随机 idle、不跳视
+      this.gazeTarget.x = expApproach(this.gazeTarget.x, 0, 3.4, dt)
+      this.gazeTarget.y = expApproach(this.gazeTarget.y, 0, 3.4, dt)
+      this.saccade.set(0, 0)
+    } else {
       const idle = this.time - this.lastPointerAt > 3.2
       if (this.orient) {
         this.gazeTarget.set(deadzone(this.orient.x, 0.1), deadzone(this.orient.y, 0.1))
@@ -307,9 +339,9 @@ export class FaceExpression {
       }
     }
 
-    // 微跳视：更稀、更小，只在已接近目标时点一下
+    // 微跳视：更稀、更小，只在已接近目标时点一下（滚动锁期间禁跳）
     const nearTarget = Math.hypot(this.gaze.x - this.gazeTarget.x, this.gaze.y - this.gazeTarget.y) < 0.12
-    if (!f && !reduced && nearTarget && this.time >= this.nextSaccade) {
+    if (!f && !reduced && !this.scrollLock && nearTarget && this.time >= this.nextSaccade) {
       this.saccade.set(rand(-0.035, 0.035), rand(-0.022, 0.022))
       this.nextSaccade = this.time + rand(1.4, 3.2)
     }

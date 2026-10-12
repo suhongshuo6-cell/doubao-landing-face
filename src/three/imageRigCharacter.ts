@@ -387,6 +387,10 @@ export class ImageRigCharacter implements CharacterRig {
     this.expr.setPointer(ndc)
   }
 
+  setScrollLock(locked: boolean): void {
+    this.expr.setScrollLock(locked)
+  }
+
   update(dt: number): void {
     if (!this.ready) return
     if (Math.abs(this.camera.aspect - this.aspect) > 0.001) this.resize()

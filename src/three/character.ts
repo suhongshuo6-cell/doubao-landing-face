@@ -14,6 +14,8 @@ export interface Character {
   /** t: 0→1 全局取景进度（对应规格 6.6 的 6 个节点） */
   setFraming(t: number): void
   setPointer(ndc: THREE.Vector2): void
+  /** 滚动中冻结视线跟随（仅立绘表情路径需要；其它实现可忽略） */
+  setScrollLock?(locked: boolean): void
   update(dt: number): void
   dispose(): void
 }

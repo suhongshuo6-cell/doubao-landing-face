@@ -256,6 +256,8 @@ function boot(): void {
 
     /* ---- 角色：双轨资产自动探测 ---- */
     let character: CharacterRig | null = null
+    /** 滚动冻结视线（提前声明：角色异步加载回调也要读） */
+    let gazeScrollLocked = false
 
     createCharacter({
       renderer: stage.renderer,
@@ -265,6 +267,8 @@ function boot(): void {
     })
       .then((rigged) => {
         character = rigged
+        // 角色晚到时：若已在滚动锁中，立刻同步，避免首段滚动仍跟伪指针
+        if (gazeScrollLocked) character.setScrollLock?.(true)
         // 注意：scene.add() 会**重新挂载**节点。立绘路径的 object3d 已经挂在相机下了，
         // 再 add 一次会把它从相机上摘下来 —— 相机会变成 0 个子节点，整个角色层不渲染。
         // 所以只给"还没有父节点"（探针/glb 路径）补挂一次。
@@ -368,6 +372,22 @@ function boot(): void {
     let longPressTimer = 0
     let lastPressing = false
     let whisperTimer = 0
+    /** 滚动冻结视线：wheel/Lenis 期间忽略指针，结束后回平静 idle */
+    let wheelFreezeUntil = 0
+    const setGazeScrollLock = (on: boolean): void => {
+      if (on === gazeScrollLocked) return
+      gazeScrollLocked = on
+      character?.setScrollLock?.(on)
+      document.documentElement.dataset.gazeScroll = on ? '1' : '0'
+    }
+    const markScrollActivity = (holdMs = 220): void => {
+      wheelFreezeUntil = Math.max(wheelFreezeUntil, performance.now() + holdMs)
+      setGazeScrollLock(true)
+    }
+    window.addEventListener('wheel', () => markScrollActivity(240), { passive: true })
+    window.addEventListener('touchmove', () => markScrollActivity(200), { passive: true })
+    // Lenis 平滑滚动也会持续触发 scroll；用短冷却覆盖惯性段
+    window.addEventListener('scroll', () => markScrollActivity(160), { passive: true })
 
     const say = (text: string): void => {
       if (!whisper) return
@@ -407,7 +427,9 @@ function boot(): void {
     }
 
     /** 触摸端没有 hover，pointermove 可能一次都不来 —— 所以按下时也要取一次坐标 */
-    const trackPointer = (event: PointerEvent): void => {
+    const trackPointer = (event: PointerEvent, opts?: { force?: boolean }): void => {
+      // 滚动中不跟指针（滚轮/触控板会夹带伪 mouse/pointer 事件让眼球乱飘）
+      if (gazeScrollLocked && !opts?.force) return
       ndc.x = (event.clientX / window.innerWidth) * 2 - 1
       ndc.y = -(event.clientY / window.innerHeight) * 2 + 1
       rig.setPointer(ndc)
@@ -420,6 +442,16 @@ function boot(): void {
     window.addEventListener(
       'pointermove',
       (event) => {
+        // 滚动驱动的 pointermove 一律丢掉；真实悬停等滚动锁解除后再跟
+        if (gazeScrollLocked) {
+          if (
+            pressOrigin &&
+            Math.hypot(event.clientX - pressOrigin.x, event.clientY - pressOrigin.y) > 12
+          ) {
+            cancelPress()
+          }
+          return
+        }
         trackPointer(event)
         // 拖动超过 12px 视为滚动/转视角，取消捏脸
         if (
@@ -439,7 +471,8 @@ function boot(): void {
         if (target?.closest('a, button, [data-no-pinch]')) return
         // 关键：触摸端第一次接触就是 pointerdown，没有 pointermove。
         // 不在这里取坐标的话 pointerInside 永远是 false，捏脸在手机上完全不会触发。
-        trackPointer(event)
+        // force：用户主动按下时即使刚停滚也立刻取坐标（不接滚动伪事件）。
+        trackPointer(event, { force: true })
         pressOrigin = { x: event.clientX, y: event.clientY }
         if (motionPrefs.coarse) {
           // 触摸端：长按 = 捏脸（规格第八节）。不设长按的话一滑动就会误捏。
@@ -505,6 +538,11 @@ function boot(): void {
 
     loop.add((dt) => {
       const state = scroll.read()
+
+      // 视线滚动锁：Lenis 速度或 wheel/scroll 冷却期内冻结；停下后回平静 idle
+      const scrolling =
+        Math.abs(state.velocity) > 0.35 || performance.now() < wheelFreezeUntil
+      setGazeScrollLock(scrolling)
 
       // 滚动进度 → 取景进度（按各区块真实位置锚定），再交给弹簧
       rig.setProgress(anchorMap.toFraming(state.progress))
